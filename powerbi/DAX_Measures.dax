@@ -1,0 +1,79 @@
+// ==============================================================================
+// CRYPTO MARKET ANALYTICS - DAX MEASURES REPOSITORY
+// Author: Mohamed Channa (Data Science, Big Data & AI - ENSA Tétouan)
+// Data Model: Star Schema (fact_marketdata, dim_coin, dim_date)
+// ==============================================================================
+
+// ------------------------------------------------------------------------------
+// 1. CORE MARKET MEASURES
+// ------------------------------------------------------------------------------
+
+[Total Market Cap] = 
+SUM(fact_marketdata[market_cap])
+
+[Total Volume 24h] = 
+SUM(fact_marketdata[volume])
+
+[Average Price] = 
+AVERAGE(fact_marketdata[price_usd])
+
+[Latest Spot Price] = 
+CALCULATE(
+    SELECTEDVALUE(fact_marketdata[price_usd]),
+    LASTDATE(dim_date[Date])
+)
+
+// ------------------------------------------------------------------------------
+// 2. MOVING AVERAGES & ROLLING INDICATORS
+// ------------------------------------------------------------------------------
+
+[7D SMA Price] = 
+AVERAGE(fact_marketdata[7_day_sma_price])
+
+[7D SMA Volume] = 
+AVERAGE(fact_marketdata[7_day_sma_volume])
+
+[30D Volatility] = 
+AVERAGE(fact_marketdata[30_day_volatility])
+
+// ------------------------------------------------------------------------------
+// 3. RETURNS & PERFORMANCE
+// ------------------------------------------------------------------------------
+
+[Daily Return %] = 
+AVERAGE(fact_marketdata[daily_return_pct])
+
+[Cumulative Return %] = 
+VAR InitialPrice = 
+    CALCULATE(
+        FIRSTNONBLANKVALUE(dim_date[Date], AVERAGE(fact_marketdata[price_usd])),
+        ALLSELECTED(dim_date)
+    )
+VAR CurrentPrice = [Average Price]
+RETURN
+    DIVIDE(CurrentPrice - InitialPrice, InitialPrice, 0) * 100
+
+// ------------------------------------------------------------------------------
+// 4. PORTFOLIO & RISK MANAGEMENT RATIOS
+// ------------------------------------------------------------------------------
+
+[Market Cap Dominance %] = 
+VAR TotalMarket = CALCULATE([Total Market Cap], ALL(dim_coin))
+RETURN
+    DIVIDE([Total Market Cap], TotalMarket, 0) * 100
+
+[Volume to Market Cap Ratio] = 
+DIVIDE([Total Volume 24h], [Total Market Cap], 0)
+
+[Sharpe Ratio Proxy] = 
+// Daily risk-adjusted return proxy
+DIVIDE([Daily Return %], [30D Volatility], 0)
+
+[Risk Classification] = 
+SWITCH(
+    TRUE(),
+    ISBLANK([30D Volatility]), "N/A",
+    [30D Volatility] < 2.5, "Low Volatility (Blue-Chip)",
+    [30D Volatility] < 3.5, "Moderate Risk",
+    "High Beta (Speculative)"
+)
