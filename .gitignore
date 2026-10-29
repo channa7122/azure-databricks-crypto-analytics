@@ -1,0 +1,22 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.venv/
+.venv/
+env/
+.env
+
+# Spark / Databricks
+derby.log
+metastore_db/
+checkpoint/
+.spark-staging/
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Power BI temp
+*.tmp
