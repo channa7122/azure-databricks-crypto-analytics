@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-========================================================================================
-Local Pipeline Runner: Bronze -> Silver -> Gold (Pandas/PyArrow Engine)
-Author: Mohamed Channa (Data Science, Big Data & AI - ENSA Tétouan)
-Description: Standalone executable pipeline that ingests raw Bronze JSON files,
-             flattens and cleans them into Silver Parquet, computes Window-based
-             financial indicators, and produces the Star Schema Gold CSVs.
-========================================================================================
-"""
-
 import os
 import json
 import pandas as pd
@@ -17,11 +6,7 @@ from datetime import datetime
 
 def run_local_pipeline():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    # Handle if executed from root or src/
-    if os.path.basename(base_dir) == "src":
-        repo_root = os.path.dirname(base_dir)
-    else:
-        repo_root = base_dir
+    repo_root = os.path.dirname(base_dir) if os.path.basename(base_dir) == "src" else base_dir
 
     bronze_dir = os.path.join(repo_root, "data", "bronze")
     silver_dir = os.path.join(repo_root, "data", "silver")
@@ -33,14 +18,14 @@ def run_local_pipeline():
     os.makedirs(powerbi_dir, exist_ok=True)
 
     print("=" * 80)
-    print(">>> [CRYPTO ANALYTICS ETL] Starting Local Pipeline Execution...")
+    print(">>> [CRYPTO ANALYTICS ETL] Exécution du pipeline local Bronze -> Silver -> Gold...")
     print("=" * 80)
 
-    # 1. BRONZE INGESTION & SILVER TRANSFORMATION
-    print("\n[STEP 1/3] Ingesting Bronze JSON files...")
+    # 1. BRONZE -> SILVER
+    print("\n[1/3] Aplatissement et nettoyage Bronze vers Silver...")
     json_files = sorted([f for f in os.listdir(bronze_dir) if f.endswith(".json")])
     if not json_files:
-        raise FileNotFoundError(f"No JSON files found in {bronze_dir}!")
+        raise FileNotFoundError(f"Aucun fichier JSON trouvé dans {bronze_dir} !")
 
     records = []
     ingestion_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -55,11 +40,9 @@ def run_local_pipeline():
         caps = data.get("market_caps", [])
         vols = data.get("total_volumes", [])
 
-        # Build dictionary by date
         coin_days = {}
         for item in prices:
-            ts_sec = item[0] / 1000.0
-            dt = datetime.utcfromtimestamp(ts_sec).strftime("%Y-%m-%d")
+            dt = datetime.utcfromtimestamp(item[0] / 1000.0).strftime("%Y-%m-%d")
             coin_days[dt] = {"price_usd": item[1], "market_cap": 0.0, "volume": 0.0}
 
         for item in caps:
@@ -82,89 +65,58 @@ def run_local_pipeline():
                 "ingestion_timestamp": ingestion_ts
             })
 
-    silver_df = pd.DataFrame(records)
-    silver_df = silver_df.drop_duplicates(subset=["coin_name", "Date"]).sort_values(["coin_name", "Date"])
-    
-    silver_parquet_path = os.path.join(silver_dir, "crypto_silver_clean.parquet")
-    silver_df.to_parquet(silver_parquet_path, index=False)
-    print(f"    -> Silver Layer output saved: {len(silver_df)} records across {silver_df['coin_name'].nunique()} assets.")
+    silver_df = pd.DataFrame(records).drop_duplicates(subset=["coin_name", "Date"]).sort_values(["coin_name", "Date"])
+    silver_df.to_parquet(os.path.join(silver_dir, "crypto_silver_clean.parquet"), index=False)
+    print(f"✅ Couche Silver créée ({len(silver_df)} lignes)")
 
-    # 2. DIMENSION TABLES (GOLD)
-    print("\n[STEP 2/3] Constructing Star Schema Dimensions...")
-    
-    # dim_coin
+    # 2. DIMENSIONS GOLD
+    print("\n[2/3] Création des dimensions du Schéma en Étoile...")
     coins = sorted(silver_df["coin_name"].unique())
-    dim_coin = pd.DataFrame({
-        "coin_name": coins,
-        "coin_id": range(1, len(coins) + 1)
-    })
+    dim_coin = pd.DataFrame({"coin_name": coins, "coin_id": range(1, len(coins) + 1)})
     dim_coin.to_csv(os.path.join(gold_dir, "dim_coin.csv"), index=False)
     dim_coin.to_csv(os.path.join(powerbi_dir, "dim_coin.csv"), index=False)
-    print(f"    -> dim_coin: {len(dim_coin)} cryptocurrencies with surrogate keys.")
 
-    # dim_date
     dates = pd.to_datetime(sorted(silver_df["Date"].unique()))
     dim_date = pd.DataFrame({
         "Date": dates.strftime("%Y-%m-%d"),
         "Year": dates.year,
         "Month": dates.month,
         "Day": dates.day,
-        "DayOfWeek": dates.dayofweek + 1, # 1=Mon .. 7=Sun
+        "DayOfWeek": dates.dayofweek + 1,
         "is_Weekend": dates.dayofweek.isin([5, 6])
     })
     dim_date.to_csv(os.path.join(gold_dir, "dim_date.csv"), index=False)
     dim_date.to_csv(os.path.join(powerbi_dir, "dim_date.csv"), index=False)
-    print(f"    -> dim_date: {len(dim_date)} days calendar dimension.")
+    print(f"✅ Dimensions créées : dim_coin ({len(dim_coin)} actifs) et dim_date ({len(dim_date)} dates)")
 
-    # 3. FACT TABLE WITH WINDOW FUNCTIONS (GOLD)
-    print("\n[STEP 3/3] Generating Fact Table with Window Analytical Functions...")
+    # 3. TABLE DE FAITS GOLD (WINDOW FUNCTIONS)
+    print("\n[3/3] Calcul des métriques financières glissantes (Window Functions)...")
     merged = silver_df.merge(dim_coin, on="coin_name", how="inner")
     merged["Date"] = pd.to_datetime(merged["Date"])
     merged = merged.sort_values(["coin_id", "Date"])
 
-    # Calculate rolling metrics per coin
     fact_records = []
     for cid, group in merged.groupby("coin_id"):
-        group = group.sort_values("Date").copy()
-        
-        # 1-day lag return
-        group["lag_price"] = group["price_usd"].shift(1)
-        group["daily_return_pct"] = ((group["price_usd"] - group["lag_price"]) / group["lag_price"]) * 100.0
-        
-        # 7-day Simple Moving Average (Price)
-        group["7_day_sma_price"] = group["price_usd"].rolling(window=7, min_periods=1).mean()
-        
-        # 30-day Rolling Volatility (Standard Deviation of daily returns)
-        group["30_day_volatility"] = group["daily_return_pct"].rolling(window=30, min_periods=2).std()
-        
-        # 7-day Simple Moving Average (Volume)
-        group["7_day_sma_volume"] = group["volume"].rolling(window=7, min_periods=1).mean()
-        
-        fact_records.append(group)
+        g = group.sort_values("Date").copy()
+        g["lag_price"] = g["price_usd"].shift(1)
+        g["daily_return_pct"] = ((g["price_usd"] - g["lag_price"]) / g["lag_price"]) * 100.0
+        g["7_day_sma_price"] = g["price_usd"].rolling(window=7, min_periods=1).mean()
+        g["30_day_volatility"] = g["daily_return_pct"].rolling(window=30, min_periods=2).std()
+        g["7_day_sma_volume"] = g["volume"].rolling(window=7, min_periods=1).mean()
+        fact_records.append(g)
 
     fact_df = pd.concat(fact_records, ignore_index=True)
     fact_df["Date"] = fact_df["Date"].dt.strftime("%Y-%m-%d")
 
-    fact_cols = [
-        "coin_id",
-        "Date",
-        "price_usd",
-        "market_cap",
-        "volume",
-        "daily_return_pct",
-        "7_day_sma_price",
-        "30_day_volatility",
-        "7_day_sma_volume"
-    ]
-    fact_final = fact_df[fact_cols].sort_values(["coin_id", "Date"])
+    cols = ["coin_id", "Date", "price_usd", "market_cap", "volume", "daily_return_pct", "7_day_sma_price", "30_day_volatility", "7_day_sma_volume"]
+    fact_final = fact_df[cols].sort_values(["coin_id", "Date"])
 
     fact_final.to_csv(os.path.join(gold_dir, "fact_marketdata.csv"), index=False)
     fact_final.to_csv(os.path.join(powerbi_dir, "fact_marketdata.csv"), index=False)
-    print(f"    -> fact_marketdata: {len(fact_final)} rows generated with financial indicators.")
+    print(f"✅ fact_marketdata.csv généré ({len(fact_final)} lignes)")
 
     print("\n" + "=" * 80)
-    print(">>> [SUCCESS] All Star Schema Gold tables created successfully!")
-    print(f"    Files exported to: {gold_dir}/ and {powerbi_dir}/")
+    print("🎉 SUCCÈS : Données générées dans data/gold/ et powerbi/ !")
     print("=" * 80)
 
 if __name__ == "__main__":
